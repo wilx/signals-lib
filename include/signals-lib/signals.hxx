@@ -26,8 +26,9 @@
 #include <memory>
 #include <mutex>
 #include <chrono>
-
-
+#include <type_traits>
+#include <utility>
+#include <cstring>
 
 
 namespace signalslib
@@ -38,9 +39,9 @@ struct scoped_signals_blocker
 {
     sigset_t old;
 
-    scoped_signals_blocker (sigset_t signals_set)
+    scoped_signals_blocker (sigset_t blocked_signals)
     {
-        pthread_sigmask (SIG_BLOCK, &signals_set, &old);
+        pthread_sigmask (SIG_BLOCK, &blocked_signals, &old);
     }
 
     ~scoped_signals_blocker ()
@@ -48,6 +49,38 @@ struct scoped_signals_blocker
         pthread_sigmask (SIG_SETMASK, &old, nullptr);
     }
 };
+
+
+inline
+size_t
+get_sigmax ()
+{
+#if defined (SIGRTMAX)
+    return SIGRTMAX;
+#else
+    return 64;
+#endif
+}
+
+
+template <typename Sigset, typename Functor>
+typename std::enable_if<
+    std::is_same<
+        typename std::remove_reference<Sigset>::type,
+        sigset_t>::value
+    >::type
+for_each_signal (Sigset && sigset, Functor func)
+{
+    int const max = get_sigmax ();
+    for (int i = 0; i != max; ++i)
+    {
+        int const ret = sigismember (&sigset, i);
+        if (ret == -1)
+            continue;
+
+        func (i, !! ret);
+    }
+}
 
 
 inline
@@ -73,6 +106,10 @@ get_reasonable_blocking_sigset_t ()
 
     return blocked_signals;
 }
+
+
+
+
 
 
 inline
@@ -149,6 +186,14 @@ xwrite (int fd, void const * buf, std::size_t size)
     }
     while (ret == -1 && errno == EINTR);
     return ret;
+}
+
+
+inline
+int
+debug_print(char const * str)
+{
+    return xwrite (1, str, std::strlen (str));
 }
 
 
@@ -274,18 +319,6 @@ protected:
 //
 //
 
-inline
-size_t
-get_sigmax ()
-{
-#if defined (SIGRTMAX)
-    return SIGRTMAX;
-#else
-    return 256;
-#endif
-}
-
-
 using signal_handler_function_type = void (*) (int, siginfo_t *, void *);
 
 
@@ -337,42 +370,29 @@ public:
         if (ret == -1)
             throw std::runtime_error ("create_pipe");
 
-        // Find first set signal in the signals set and use its number as a
-        // slot number for handlers vector.
+        // Block (almost) all signals.
 
-        size_t const max = get_sigmax () + 1;
-        int i;
-        ret = -1;
-        for (i = 0;
-             static_cast<std::size_t>(i) != max
-                 && ! (ret = sigismember (&signals, i));
-             ++i)
-        { }
+        sigset_t blocked_signals = get_reasonable_blocking_sigset_t ();
+        scoped_signals_blocker sig_blocker (blocked_signals);
 
-        // TODO: Check ret == -1 here.
+        // Install signal handlers for signals that interest us.
 
-        slot_index = i;
+        for_each_signal (signals, [this](int sig, bool is_set)
+            {
+                if (! is_set)
+                    return;
 
-        // Install signal handlers.
+                set_handler_ptr (sig, this);
 
-        for (; i != max; ++i)
-        {
-            ret = sigismember (&signals, i);
-            // TODO: Check ret == -1 here.
+                struct sigaction old_act;
+                int ret;
+                std::tie (ret, old_act)
+                    = install_sig_handler (signalslib_signal_handler_func, sig);
+                // TODO:: Error handling.
+                set_old_sigaction (sig, old_act);
+            });
 
-            if (! ret)
-                continue;
-
-            set_handler_ptr (slot_index, this);
-            std::atomic_signal_fence (std::memory_order_acq_rel);
-            struct sigaction old_act;
-            std::tie (ret, old_act)
-                = install_sig_handler (signalslib_signal_handler_func, i);
-            set_old_sigaction (i, old_act);
-        }
-
-        scoped_signals_blocker sig_blocker (
-            get_reasonable_blocking_sigset_t ());
+        std::atomic_signal_fence (std::memory_order_acq_rel);
         handler_thread.reset (
             new std::thread (&PosixHandler::thread_function, this));
     }
@@ -393,17 +413,32 @@ public:
     void
     thread_function ()
     {
+        debug_print ("thread_function\n");
+
+        // Unblock signals that interest us. They can be blocked in all other
+        // threads.
+
+        int ret = pthread_sigmask (SIG_UNBLOCK, &signals, nullptr);
+        if (ret != 0)
+            std::abort ();
+
+        // Poll signals and shutdown file descriptors.
+
         for (;;)
         {
             // Poll handles here.
+            debug_print ("entering poll_fds\n");
             FDs signaled_handle = poll_fds ();
+            debug_print ("exited poll_fds\n");
             switch (signaled_handle)
             {
             case SIGNALS_FD:
+                debug_print ("got signals FD signaled\n");
                 handle_one_signal ();
                 break;
 
             case SHUTDOWN_FD:
+                debug_print ("got shutdown FD signaled\n");
                 return;
 
             default:
@@ -441,7 +476,11 @@ public:
         restore_signal_handlers ();
         signal_shutdown ();
         wait_shutdown ();
-        set_handler_ptr (slot_index,  nullptr);
+        for_each_signal (signals, [](int sig, bool is_set)
+            {
+                if (is_set)
+                    set_handler_ptr (sig,  nullptr);
+            });
         std::atomic_signal_fence (std::memory_order_acq_rel);
         close (get_signals_fd_read_end ());
         close (get_signals_fd_write_end ());
@@ -479,10 +518,12 @@ public:
         shutdown_pollfd.revents = 0;
 
         int ret;
-        while (((ret = poll (&pollfds[0], 2, -1))
+        while (((ret = poll (&pollfds[0], 2, -1)) == -1
                 && errno == EINTR)
             || ret == 0)
-            ;
+        {
+            debug_print ("looping poll\n");
+        }
         if (ret == -1)
             // TODO: Error handling.
             std::abort ();
@@ -502,7 +543,6 @@ protected:
         void * context);
 
 
-    size_t slot_index;
     std::array<int, 2> signals_pipe_fds;
 
     static std::mutex mtx;
@@ -565,12 +605,20 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
 {
     using namespace signalslib;
 
+    debug_print ("signal handler called\n");
+
     PosixHandler * const handler = PosixHandler::get_handler_ptr (sig);
     int const signals_fd = handler->get_signals_fd_write_end ();
     signal_info const si {sig, siginfo ? *siginfo : siginfo_t (),
             context ? *reinterpret_cast<ucontext_t *>(context) : ucontext_t ()};
     int ret = xwrite (signals_fd, &si, sizeof (si));
+    if (ret == -1)
+        std::abort ();
+    else if (ret < sizeof (si))
+        std::abort ();
     // TODO: Error handling. Also check for incomplete write.
+
+    debug_print ("signal handler exiting\n");
 }
 
 
