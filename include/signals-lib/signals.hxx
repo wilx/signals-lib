@@ -219,6 +219,19 @@ xread (int fd, void * buf_ptr, std::size_t buf_size)
 }
 
 
+inline
+int
+xclose (int fd)
+{
+    int ret;
+    while ((ret = close (fd)) == -1
+        && errno == EINTR)
+        ;
+
+    return ret;
+}
+
+
 using signal_handler_callback_type =
     std::function<void (int, siginfo_t const &, ucontext_t const &)>;
 
@@ -269,8 +282,8 @@ public:
     virtual
     ~HandlerBase ()
     {
-        close (get_shutdown_fd_write_end ());
-        close (get_shutdown_fd_read_end ());
+        xclose (get_shutdown_fd_write_end ());
+        xclose (get_shutdown_fd_read_end ());
     }
 
     virtual
@@ -454,19 +467,16 @@ public:
         std::unique_lock<std::mutex> lock (mtx);
 
         size_t const max = get_sigmax ();
-        for (int i = 0; i != max; ++i)
-        {
-            int ret = sigismember (&signals, i);
-            // TODO: Check ret == -1 here.
+        for_each_signal (signals, [this](int sig, bool is_set)
+            {
+                if (is_set)
+                    return;
 
-            if (! ret)
-                continue;
-
-            struct sigaction old_act = get_old_sigaction (i);
-            ret = restore_sig_handler (old_act, i);
-            set_handler_ptr (i, nullptr);
-            // TODO: Error handling.
-        }
+                struct sigaction old_act = get_old_sigaction (sig);
+                int ret = restore_sig_handler (old_act, sig);
+                set_handler_ptr (sig, nullptr);
+                // TODO: Error handling.
+            });
     }
 
 
@@ -482,8 +492,8 @@ public:
                     set_handler_ptr (sig,  nullptr);
             });
         std::atomic_signal_fence (std::memory_order_acq_rel);
-        close (get_signals_fd_read_end ());
-        close (get_signals_fd_write_end ());
+        xclose (get_signals_fd_read_end ());
+        xclose (get_signals_fd_write_end ());
     }
 
 
