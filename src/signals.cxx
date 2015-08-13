@@ -4,8 +4,7 @@
 namespace signalslib
 {
 
-std::mutex PosixHandler::mtx;
-std::vector<PosixHandler *> PosixHandler::handlers (get_sigmax ());
-std::vector<struct sigaction> PosixHandler::old_sigactions (get_sigmax ());
+std::vector<std::atomic<PosixHandler *> > PosixHandler::handlers (
+    get_sigmax ());
 
 } // namespace signalslib

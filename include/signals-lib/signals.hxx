@@ -108,10 +108,6 @@ get_reasonable_blocking_sigset_t ()
 }
 
 
-
-
-
-
 inline
 bool
 try_set_close_on_exec (int fd)
@@ -378,6 +374,7 @@ class PosixHandler
 public:
     PosixHandler (sigset_t const & s, signal_handler_callback_type cb)
         : HandlerBase (s, std::move (cb))
+        , old_sigactions (get_sigmax ())
     {
         int ret = create_pipe (signals_pipe_fds);
         if (ret == -1)
@@ -464,8 +461,6 @@ public:
     void
     restore_signal_handlers ()
     {
-        std::unique_lock<std::mutex> lock (mtx);
-
         size_t const max = get_sigmax ();
         for_each_signal (signals, [this](int sig, bool is_set)
             {
@@ -554,10 +549,10 @@ protected:
 
 
     std::array<int, 2> signals_pipe_fds;
+    std::vector<struct sigaction> old_sigactions;
 
-    static std::mutex mtx;
-    static std::vector<PosixHandler *> handlers;
-    static std::vector<struct sigaction> old_sigactions;
+    static std::vector<std::atomic<PosixHandler *> > handlers;
+
 
 
     static
@@ -567,7 +562,7 @@ protected:
         if (slot >= PosixHandler::handlers.size ())
             throw std::out_of_range ("");
 
-        handlers[slot] = handler;
+        handlers[slot].store (handler);
     }
 
 
@@ -578,11 +573,10 @@ protected:
         if (slot >= PosixHandler::handlers.size ())
             throw std::out_of_range ("");
 
-        return handlers[slot];
+        return handlers[slot].load ();
     }
 
 
-    static
     struct sigaction
     get_old_sigaction (std::size_t slot)
     {
@@ -593,7 +587,6 @@ protected:
     }
 
 
-    static
     void
     set_old_sigaction (std::size_t slot, struct sigaction const & old_act)
     {
