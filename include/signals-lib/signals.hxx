@@ -28,11 +28,23 @@
 #include <chrono>
 #include <type_traits>
 #include <utility>
+#include <limits>
 #include <cstring>
+#include <stdexcept>
+#include <system_error>
 
 
 namespace signalslib
 {
+
+
+inline
+void
+throw_system_error (int eno, char const * function)
+{
+    throw std::system_error (eno, std::system_category (),
+        function);
+}
 
 
 struct scoped_signals_blocker
@@ -41,12 +53,17 @@ struct scoped_signals_blocker
 
     scoped_signals_blocker (sigset_t blocked_signals)
     {
-        pthread_sigmask (SIG_BLOCK, &blocked_signals, &old);
+        int ret = pthread_sigmask (SIG_BLOCK, &blocked_signals, &old);
+        if (ret != 0)
+            throw_system_error (ret, "pthread_sigmask");
+
     }
 
-    ~scoped_signals_blocker ()
+    ~scoped_signals_blocker () throw (std::system_error)
     {
-        pthread_sigmask (SIG_SETMASK, &old, nullptr);
+        int ret = pthread_sigmask (SIG_SETMASK, &old, nullptr);
+        if (ret != 0)
+            throw_system_error (ret, "pthread_sigmask");
     }
 };
 
@@ -153,16 +170,12 @@ enum PipeEnds
 
 struct Handler
 {
-    virtual FDs poll_fds () = 0;
-    virtual void signal_shutdown () = 0;
-    virtual void wait_shutdown () = 0;
-
-    virtual ~Handler () = 0;
+    virtual ~Handler () noexcept (false) = 0;
 };
 
 
 inline
-Handler::~Handler ()
+Handler::~Handler () noexcept (false)
 { }
 
 
@@ -177,10 +190,24 @@ xwrite (int fd, void const * buf, std::size_t size)
 {
     int ret;
     do
-    {
         ret = write (fd, buf, size);
-    }
     while (ret == -1 && errno == EINTR);
+    if (ret == -1)
+        throw_system_error (errno, "write");
+    return ret;
+}
+
+
+inline
+int
+xpoll (struct pollfd * pollfds, int nfds, int timeout)
+{
+    int ret;
+    do
+        ret = poll (&pollfds[0], 2, -1);
+    while ((ret == -1
+            && errno == EINTR)
+        || ret == 0);
     return ret;
 }
 
@@ -205,7 +232,7 @@ xread (int fd, void * buf_ptr, std::size_t buf_size)
         if (res == -1 && errno == EINTR)
             continue;
         else if (res == -1)
-            return res;
+            throw_system_error (errno, "read");
 
         read_bytes += res;
     }
@@ -223,6 +250,8 @@ xclose (int fd)
     while ((ret = close (fd)) == -1
         && errno == EINTR)
         ;
+    if (ret == -1)
+        throw_system_error (errno, "close");
 
     return ret;
 }
@@ -240,9 +269,14 @@ create_pipe (std::array<int, 2> & fds)
 
 #if defined (SIGNALS_LIB_HAVE_PIPE2)
     ret = pipe2 (&fds[0], O_CLOEXEC);
+    if (ret == -1)
+        throw_system_error (errno, "pipe2");
 
 #else
     ret = pipe (&fds[0]);
+    if (ret == -1)
+        throw_system_error (errno, "pipe");
+
     try_set_close_on_exec (fds[0]);
     try_set_close_on_exec (fds[1]);
 
@@ -264,9 +298,7 @@ public:
         : signals (s)
         , callback (std::move (cb))
     {
-        int ret = create_pipe (shutdown_pipe_fds);
-        if (ret == -1)
-            throw std::runtime_error ("create_pipe");
+        create_pipe (shutdown_pipe_fds);
     }
 
     HandlerBase () = delete;
@@ -276,7 +308,7 @@ public:
     HandlerBase & operator = (HandlerBase &&) = delete;
 
     virtual
-    ~HandlerBase ()
+    ~HandlerBase () noexcept (false)
     {
         xclose (get_shutdown_fd_write_end ());
         xclose (get_shutdown_fd_read_end ());
@@ -287,21 +319,15 @@ public:
     signal_shutdown ()
     {
         char const ch = 'S';
-        int ret = xwrite (get_shutdown_fd_write_end (), &ch, 1);
-        // TODO: Error handling.
-        if (ret == -1)
-            std::abort ();
+        xwrite (get_shutdown_fd_write_end (), &ch, 1);
     }
-
 
     virtual
     void
     wait_shutdown ()
     {
-        if (handler_thread)
-            handler_thread->join ();
+        handler_thread->join ();
     }
-
 
     int
     get_shutdown_fd_read_end () const
@@ -314,7 +340,6 @@ public:
     {
         return shutdown_pipe_fds[WRITE_END];
     }
-
 
 protected:
     sigset_t signals;
@@ -332,7 +357,7 @@ using signal_handler_function_type = void (*) (int, siginfo_t *, void *);
 
 
 inline
-std::tuple<int, struct sigaction>
+struct sigaction
 install_sig_handler(signal_handler_function_type func, int sig)
 {
     struct sigaction act{};
@@ -342,16 +367,20 @@ install_sig_handler(signal_handler_function_type func, int sig)
 
     struct sigaction old;
     int ret = sigaction (sig, &act, &old);
+    if (ret == -1)
+        throw_system_error (errno, "sigaction");
 
-    return std::make_tuple (ret, old);
+    return old;
 }
 
 
 inline
-int
+void
 restore_sig_handler (struct sigaction const & old_act, int sig)
 {
-    return sigaction (sig, &old_act, nullptr);
+    int ret = sigaction (sig, &old_act, nullptr);
+    if (ret == -1)
+        throw_system_error (errno, "sigaction");
 }
 
 
@@ -376,9 +405,7 @@ public:
         : HandlerBase (s, std::move (cb))
         , old_sigactions (get_sigmax ())
     {
-        int ret = create_pipe (signals_pipe_fds);
-        if (ret == -1)
-            throw std::runtime_error ("create_pipe");
+        create_pipe (signals_pipe_fds);
 
         // Block (almost) all signals.
 
@@ -395,14 +422,11 @@ public:
                 set_handler_ptr (sig, this);
 
                 struct sigaction old_act;
-                int ret;
-                std::tie (ret, old_act)
-                    = install_sig_handler (signalslib_signal_handler_func, sig);
-                // TODO:: Error handling.
+                old_act = install_sig_handler (
+                    signalslib_signal_handler_func, sig);
                 set_old_sigaction (sig, old_act);
             });
 
-        std::atomic_signal_fence (std::memory_order_acq_rel);
         handler_thread.reset (
             new std::thread (&PosixHandler::thread_function, this));
     }
@@ -412,10 +436,7 @@ public:
     handle_one_signal ()
     {
         signal_info si;
-        int ret = xread (get_signals_fd_read_end (), &si, sizeof (si));
-        if (ret == -1)
-            std::abort ();
-
+        xread (get_signals_fd_read_end (), &si, sizeof (si));
         callback (si.signo, si.siginfo, si.context);
     }
 
@@ -430,7 +451,7 @@ public:
 
         int ret = pthread_sigmask (SIG_UNBLOCK, &signals, nullptr);
         if (ret != 0)
-            std::abort ();
+            throw_system_error (ret, "pthread_sigmask");
 
         // Poll signals and shutdown file descriptors.
 
@@ -464,19 +485,18 @@ public:
         size_t const max = get_sigmax ();
         for_each_signal (signals, [this](int sig, bool is_set)
             {
-                if (is_set)
+                if (! is_set)
                     return;
 
                 struct sigaction old_act = get_old_sigaction (sig);
-                int ret = restore_sig_handler (old_act, sig);
+                restore_sig_handler (old_act, sig);
                 set_handler_ptr (sig, nullptr);
-                // TODO: Error handling.
             });
     }
 
 
     virtual
-    ~PosixHandler ()
+    ~PosixHandler () noexcept (false)
     {
         restore_signal_handlers ();
         signal_shutdown ();
@@ -486,7 +506,6 @@ public:
                 if (is_set)
                     set_handler_ptr (sig,  nullptr);
             });
-        std::atomic_signal_fence (std::memory_order_acq_rel);
         xclose (get_signals_fd_read_end ());
         xclose (get_signals_fd_write_end ());
     }
@@ -522,16 +541,7 @@ public:
         shutdown_pollfd.events = POLLIN;
         shutdown_pollfd.revents = 0;
 
-        int ret;
-        while (((ret = poll (&pollfds[0], 2, -1)) == -1
-                && errno == EINTR)
-            || ret == 0)
-        {
-            debug_print ("looping poll\n");
-        }
-        if (ret == -1)
-            // TODO: Error handling.
-            std::abort ();
+        int ret = xpoll (&pollfds[0], 2, -1);
 
         if ((shutdown_pollfd.revents & POLLIN) == POLLIN)
             return SHUTDOWN_FD;
@@ -552,7 +562,6 @@ protected:
     std::vector<struct sigaction> old_sigactions;
 
     static std::vector<std::atomic<PosixHandler *> > handlers;
-
 
 
     static
@@ -619,7 +628,6 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
         std::abort ();
     else if (ret < sizeof (si))
         std::abort ();
-    // TODO: Error handling. Also check for incomplete write.
 
     debug_print ("signal handler exiting\n");
 }
