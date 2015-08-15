@@ -6,13 +6,14 @@ int
 main ()
 {
     std::cout << "signals test\n";
-    sigset_t sig_set;
-    sigemptyset (&sig_set);
-    sigaddset (&sig_set, SIGUSR1);
     auto func = [](int signo, siginfo_t const & si, ucontext_t const &) {
         std::cout << "got signal " << signo << "\n";
     };
     {
+        sigset_t sig_set;
+        sigemptyset (&sig_set);
+        sigaddset (&sig_set, SIGUSR1);
+
         signalslib::PosixHandler s (sig_set, func);
 
         signalslib::scoped_signals_blocker blocker (
