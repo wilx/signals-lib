@@ -9,7 +9,7 @@ main ()
     sigset_t sig_set;
     sigemptyset (&sig_set);
     sigaddset (&sig_set, SIGUSR1);
-    auto func = [](int signo, siginfo_t const & si, ucontext_t const &) -> void {
+    auto func = [](int signo, siginfo_t const & si, ucontext_t const &) {
         std::cout << "got signal " << signo << "\n";
     };
     {
@@ -28,7 +28,7 @@ main ()
                 }
             });
         signaler.join ();
-        signalslib::debug_print ("signaler thread joined\n");
+        std::cout << "signaler thread joined\n";
     }
-    signalslib::debug_print ("exiting main()\n");
+    std::cout << "exiting main()\n";
 }

@@ -214,14 +214,6 @@ xpoll (struct pollfd * pollfds, int nfds, int timeout)
 
 inline
 int
-debug_print(char const * str)
-{
-    return xwrite (1, str, std::strlen (str));
-}
-
-
-inline
-int
 xread (int fd, void * buf_ptr, std::size_t buf_size)
 {
     long read_bytes = 0;
@@ -444,8 +436,6 @@ public:
     void
     thread_function ()
     {
-        debug_print ("thread_function\n");
-
         // Unblock signals that interest us. They can be blocked in all other
         // threads.
 
@@ -458,18 +448,14 @@ public:
         for (;;)
         {
             // Poll handles here.
-            debug_print ("entering poll_fds\n");
             FDs signaled_handle = poll_fds ();
-            debug_print ("exited poll_fds\n");
             switch (signaled_handle)
             {
             case SIGNALS_FD:
-                debug_print ("got signals FD signaled\n");
                 handle_one_signal ();
                 break;
 
             case SHUTDOWN_FD:
-                debug_print ("got shutdown FD signaled\n");
                 return;
 
             default:
@@ -617,8 +603,6 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
 {
     using namespace signalslib;
 
-    debug_print ("signal handler called\n");
-
     PosixHandler * const handler = PosixHandler::get_handler_ptr (sig);
     int const signals_fd = handler->get_signals_fd_write_end ();
     signal_info const si {sig, siginfo ? *siginfo : siginfo_t (),
@@ -628,8 +612,6 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
         std::abort ();
     else if (ret < sizeof (si))
         std::abort ();
-
-    debug_print ("signal handler exiting\n");
 }
 
 
