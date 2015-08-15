@@ -29,9 +29,10 @@
 #include <type_traits>
 #include <utility>
 #include <limits>
-#include <cstring>
 #include <stdexcept>
 #include <system_error>
+#include <cstring>
+#include <cstdint>
 
 
 namespace signalslib
@@ -143,12 +144,55 @@ try_set_close_on_exec (int fd)
 
 //! This structure gets written into pipe from signal handler to convey all the
 //! necessary information to the handling thread.
-struct signal_info
+struct posix_signal_info
 {
     int signo;
     siginfo_t siginfo;
     ucontext_t context;
 };
+
+
+//! This structure is here to convey signal information provided by various
+//! different signal handling facilities to the user callback. The individual
+//! members are filled from `si_*` members of `siginfo_t` or
+//! `signalfd_siginfo_t`.
+struct signal_info
+{
+    std::uint_least32_t signo;
+    std::int_least32_t code;
+    std::int_least32_t eno;
+    pid_t pid;
+    uid_t uid;
+    int fd;
+    std::uint_least32_t tid;
+    void * addr;
+    std::int_least32_t status;
+    std::int_least64_t band;
+    std::uint_least32_t overrun;
+    std::uint_least32_t trapno;
+    std::uint_least64_t utime;
+    std::uint_least64_t stime;
+
+    // De-multiplexed members of `union sigval`.
+
+    int int_value;
+    void * ptr_value;
+
+    // Context provided in POSIX signal handler function.
+
+    ucontext_t context;
+};
+
+
+template <typename DestType, typename SrcType>
+void
+copy_field (DestType & dest, SrcType const & src)
+{
+    SrcType tmp;
+    std::memcpy (&tmp, &src, sizeof (SrcType));
+    static_assert (sizeof (DestType) >= sizeof (SrcType), "");
+    dest = static_cast<DestType>(tmp);
+}
 
 
 //
@@ -250,7 +294,7 @@ xclose (int fd)
 
 
 using signal_handler_callback_type =
-    std::function<void (int, siginfo_t const &, ucontext_t const &)>;
+    std::function<void (signal_info const &)>;
 
 
 inline
@@ -465,9 +509,50 @@ protected:
     void
     handle_one_signal ()
     {
+        posix_signal_info psi;
+        xread (get_signals_fd_read_end (), &psi, sizeof (psi));
+
         signal_info si;
-        xread (get_signals_fd_read_end (), &si, sizeof (si));
-        callback (si.signo, si.siginfo, si.context);
+
+        // Members of siginfo_t as described by SUS.
+
+        copy_field (si.signo, psi.siginfo.si_signo);
+        copy_field (si.code, psi.siginfo.si_code);
+        copy_field (si.eno, psi.siginfo.si_errno);
+        copy_field (si.pid, psi.siginfo.si_pid);
+        copy_field (si.uid, psi.siginfo.si_uid);
+        copy_field (si.addr, psi.siginfo.si_addr);
+        copy_field (si.status, psi.siginfo.si_status);
+        copy_field (si.band, psi.siginfo.si_band);
+
+        // De-multiplexed members of `union sigval`.
+
+        copy_field (si.int_value, psi.siginfo.si_value.sival_int);
+        copy_field (si.ptr_value, psi.siginfo.si_value.sival_ptr);
+
+        // Members of siginfo_t outside of SUS.
+
+#if defined (__linux__)
+        copy_field (si.fd, psi.siginfo.si_fd);
+#endif
+#if defined (__FreeBSD__)
+        copy_field (si.mpq, psi.siginfo.si_mpq);
+        copy_field (si.trapno, psi.siginfo.si_trapno);
+#endif
+#if defined (__linux__) \
+    || defined (__FreeBSD__)
+        copy_field (si.tid, psi.siginfo.si_timerid);
+        copy_field (si.overrun, psi.siginfo.si_overrun);
+
+        copy_field (si.utime, psi.siginfo.si_utime);
+        copy_field (si.stime, psi.siginfo.si_stime);
+#endif
+
+        // Thread context.
+
+        si.context = psi.context;
+
+        callback (si);
     }
 
 
@@ -598,7 +683,7 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
 
     PosixHandler * const handler = PosixHandler::get_handler_ptr (sig);
     int const signals_fd = handler->get_signals_fd_write_end ();
-    signal_info const si {sig, siginfo ? *siginfo : siginfo_t (),
+    posix_signal_info const si {sig, siginfo ? *siginfo : siginfo_t (),
             context ? *reinterpret_cast<ucontext_t *>(context) : ucontext_t ()};
     int ret = xwrite (signals_fd, &si, sizeof (si));
     if (ret == -1)

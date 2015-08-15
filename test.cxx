@@ -6,8 +6,8 @@ int
 main ()
 {
     std::cout << "signals test\n";
-    auto func = [](int signo, siginfo_t const & si, ucontext_t const &) {
-        std::cout << "got signal " << signo << "\n";
+    auto func = [](signalslib::signal_info const & si) {
+        std::cout << "got signal " << si.signo << "\n";
     };
     {
         sigset_t sig_set;
