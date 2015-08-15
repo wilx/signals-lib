@@ -306,7 +306,6 @@ public:
         xclose (get_shutdown_fd_read_end ());
     }
 
-    virtual
     void
     signal_shutdown ()
     {
@@ -314,7 +313,6 @@ public:
         xwrite (get_shutdown_fd_write_end (), &ch, 1);
     }
 
-    virtual
     void
     wait_shutdown ()
     {
@@ -331,6 +329,31 @@ public:
     get_shutdown_fd_write_end () const
     {
         return shutdown_pipe_fds[WRITE_END];
+    }
+
+    FDs
+    poll_fds (int signals_fd, int shutdown_fd)
+    {
+        std::array<struct pollfd, 2> pollfds;
+
+        struct pollfd & signals_pollfd = pollfds[SIGNALS_FD];
+        signals_pollfd.fd = signals_fd;
+        signals_pollfd.events = POLLIN;
+        signals_pollfd.revents = 0;
+
+        struct pollfd & shutdown_pollfd = pollfds[SHUTDOWN_FD];
+        shutdown_pollfd.fd = shutdown_fd;
+        shutdown_pollfd.events = POLLIN;
+        shutdown_pollfd.revents = 0;
+
+        int ret = xpoll (&pollfds[0], 2, -1);
+
+        if ((shutdown_pollfd.revents & POLLIN) == POLLIN)
+            return SHUTDOWN_FD;
+        else if ((signals_pollfd.revents & POLLIN) == POLLIN)
+            return SIGNALS_FD;
+
+        throw std::logic_error ("unknown handle signaled");
     }
 
 protected:
@@ -423,7 +446,22 @@ public:
             new std::thread (&PosixHandler::thread_function, this));
     }
 
+    virtual
+    ~PosixHandler () noexcept (false)
+    {
+        restore_signal_handlers ();
+        signal_shutdown ();
+        wait_shutdown ();
+        for_each_signal (signals, [](int sig, bool is_set)
+            {
+                if (is_set)
+                    set_handler_ptr (sig,  nullptr);
+            });
+        xclose (get_signals_fd_read_end ());
+        xclose (get_signals_fd_write_end ());
+    }
 
+protected:
     void
     handle_one_signal ()
     {
@@ -448,7 +486,8 @@ public:
         for (;;)
         {
             // Poll handles here.
-            FDs signaled_handle = poll_fds ();
+            FDs signaled_handle = poll_fds (get_signals_fd_read_end (),
+                get_shutdown_fd_read_end ());
             switch (signaled_handle)
             {
             case SIGNALS_FD:
@@ -481,22 +520,6 @@ public:
     }
 
 
-    virtual
-    ~PosixHandler () noexcept (false)
-    {
-        restore_signal_handlers ();
-        signal_shutdown ();
-        wait_shutdown ();
-        for_each_signal (signals, [](int sig, bool is_set)
-            {
-                if (is_set)
-                    set_handler_ptr (sig,  nullptr);
-            });
-        xclose (get_signals_fd_read_end ());
-        xclose (get_signals_fd_write_end ());
-    }
-
-
     int
     get_signals_fd_read_end () const
     {
@@ -510,36 +533,6 @@ public:
         return signals_pipe_fds[WRITE_END];
     }
 
-
-    virtual
-    FDs
-    poll_fds ()
-    {
-        std::array<struct pollfd, 2> pollfds;
-
-        struct pollfd & signals_pollfd = pollfds[SIGNALS_FD];
-        signals_pollfd.fd = get_signals_fd_read_end ();
-        signals_pollfd.events = POLLIN;
-        signals_pollfd.revents = 0;
-
-        struct pollfd & shutdown_pollfd = pollfds[SHUTDOWN_FD];
-        shutdown_pollfd.fd = get_shutdown_fd_read_end ();
-        shutdown_pollfd.events = POLLIN;
-        shutdown_pollfd.revents = 0;
-
-        int ret = xpoll (&pollfds[0], 2, -1);
-
-        if ((shutdown_pollfd.revents & POLLIN) == POLLIN)
-            return SHUTDOWN_FD;
-        else if ((signals_pollfd.revents & POLLIN) == POLLIN)
-            return SIGNALS_FD;
-
-        throw std::logic_error ("unknown handle signaled");
-    }
-
-
-
-protected:
     friend void ::signalslib_signal_handler_func  (int sig, siginfo_t * siginfo,
         void * context);
 
