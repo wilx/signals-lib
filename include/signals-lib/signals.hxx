@@ -195,6 +195,17 @@ copy_field (DestType & dest, SrcType const & src)
 }
 
 
+template <typename DestType, typename SrcType>
+void
+copy_field (DestType * & dest, SrcType const & src)
+{
+    SrcType tmp;
+    std::memcpy (&tmp, &src, sizeof (SrcType));
+    static_assert (sizeof (DestType *) == sizeof (SrcType), "");
+    dest = reinterpret_cast<DestType *>(tmp);
+}
+
+
 //
 //
 //
@@ -693,5 +704,151 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
 }
 
 
+namespace signalslib
+{
+
+
+#if VERSIONS_LIB_LINUX_PREREQ (2, 6, 22) \
+    && VERSIONS_LIB_GLIBC_PREREQ (2, 8)
+
+inline
+int
+create_signalfd (sigset_t const & signals)
+{
+    int flags = 0;
+
+    bool const have_sfd_cloexec
+        = versionslib::get_linux_rt_version ()
+            >= versionslib::version_triple {2, 6, 27}
+        && versionslib::get_glibc_rt_version ()
+            >= versionslib::version_triple {2, 9, 0}
+        &&
+#if defined (SFD_CLOEXEC)
+            true
+#else
+            false
+#endif
+            ;
+
+    if (have_sfd_cloexec)
+    {
+
+#if defined (SFD_CLOEXEC)
+        flags = SFD_CLOEXEC;
+#endif
+    }
+
+    int ret = signalfd (-1, &signals, flags);
+    if (ret == -1)
+        throw_system_error (errno, "signalfd");
+
+    if (! have_sfd_cloexec)
+        try_set_close_on_exec (ret);
+
+    return ret;
+}
+
+
+class SignalFDHandler
+    : public HandlerBase
+{
+public:
+    SignalFDHandler (sigset_t const & s, signal_handler_callback_type cb)
+        : HandlerBase (s, std::move (cb))
+    {
+        // Block most signals.
+
+        sigset_t blocked_signals = get_reasonable_blocking_sigset_t ();
+        scoped_signals_blocker blocker (blocked_signals);
+
+        signals_fd = create_signalfd (signals);
+        handler_thread.reset (
+            new std::thread (&SignalFDHandler::thread_function, this));
+    }
+
+    virtual
+    ~SignalFDHandler () noexcept (false)
+    {
+        signal_shutdown ();
+        wait_shutdown ();
+        xclose (signals_fd);
+    }
+
+protected:
+    void
+    handle_one_signal ()
+    {
+        struct signalfd_siginfo fdsi;
+        xread (get_signals_fd (), &fdsi, sizeof (fdsi));
+
+        signal_info si;
+        copy_field (si.signo, fdsi.ssi_signo);
+        copy_field (si.eno, fdsi.ssi_errno);
+        copy_field (si.code, fdsi.ssi_code);
+        copy_field (si.pid, fdsi.ssi_pid);
+        copy_field (si.uid, fdsi.ssi_uid);
+        copy_field (si.fd, fdsi.ssi_fd);
+        //copy_field (si.timerid, fdsi.ssi_timerid);
+        copy_field (si.band, fdsi.ssi_band);
+        copy_field (si.overrun, fdsi.ssi_overrun);
+        copy_field (si.trapno, fdsi.ssi_trapno);
+        copy_field (si.status, fdsi.ssi_status);
+        copy_field (si.int_value, fdsi.ssi_int);
+        copy_field (si.ptr_value, fdsi.ssi_ptr);
+        copy_field (si.utime, fdsi.ssi_utime);
+        copy_field (si.stime, fdsi.ssi_stime);
+        copy_field (si.addr, fdsi.ssi_addr);
+
+        callback (si);
+    }
+
+
+    void
+    thread_function ()
+    {
+        // If one of the still not blocked signals is one of those that
+        // interest us, block them as well so that the signalfd() mechanism can
+        // work.
+
+        int ret = pthread_sigmask (SIG_BLOCK, &signals, nullptr);
+        if (ret != 0)
+            throw_system_error (ret, "pthread_sigmask");
+
+        // Poll signals and shutdown file descriptors.
+
+        for (;;)
+        {
+            // Poll handles here.
+            FDs signaled_handle = poll_fds (get_signals_fd (),
+                get_shutdown_fd_read_end ());
+            switch (signaled_handle)
+            {
+            case SIGNALS_FD:
+                handle_one_signal ();
+                break;
+
+            case SHUTDOWN_FD:
+                return;
+
+            default:
+                throw std::logic_error ("unknown handle kind signaled");
+            }
+        }
+    }
+
+
+    int
+    get_signals_fd () const
+    {
+        return signals_fd;
+    }
+
+
+    int signals_fd;
+};
+
+#endif // PREREQ
+
+} // namespace signalslib
 
 #endif // SIGNALS_LIB_SIGNALS_HXX
