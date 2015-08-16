@@ -430,7 +430,8 @@ inline
 struct sigaction
 install_sig_handler(signal_handler_function_type func, int sig)
 {
-    struct sigaction act{};
+    struct sigaction act;
+    std::memset (&act, 0, sizeof (act));
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = func;
     act.sa_mask = get_reasonable_blocking_sigset_t ();
