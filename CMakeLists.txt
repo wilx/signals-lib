@@ -14,7 +14,7 @@ list (APPEND includes_dir
 list (APPEND cxx_features cxx_auto_type cxx_decltype cxx_defaulted_functions
   cxx_deleted_functions cxx_nullptr cxx_nonstatic_member_init
   cxx_rvalue_references)
-list (APPEND cxx_options "-std=c++11")
+list (APPEND cxx_options "-std=c++11" "-Wall" "-Wextra")
 
 add_library (signalslib src/signals.cxx)
 target_include_directories (signalslib PUBLIC ${includes_dir})

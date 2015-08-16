@@ -259,7 +259,7 @@ xpoll (struct pollfd * pollfds, int nfds, int timeout)
 {
     int ret;
     do
-        ret = poll (&pollfds[0], 2, -1);
+        ret = poll (&pollfds[0], nfds, timeout);
     while ((ret == -1
             && errno == EINTR)
         || ret == 0);
@@ -401,7 +401,7 @@ public:
         shutdown_pollfd.events = POLLIN;
         shutdown_pollfd.revents = 0;
 
-        int ret = xpoll (&pollfds[0], 2, -1);
+        xpoll (&pollfds[0], 2, -1);
 
         if ((shutdown_pollfd.revents & POLLIN) == POLLIN)
             return SHUTDOWN_FD;
@@ -603,7 +603,6 @@ protected:
     void
     restore_signal_handlers ()
     {
-        size_t const max = get_sigmax ();
         for_each_signal (signals, [this](int sig, bool is_set)
             {
                 if (! is_set)
@@ -699,7 +698,7 @@ signalslib_signal_handler_func  (int sig, siginfo_t * siginfo, void * context)
     int ret = xwrite (signals_fd, &si, sizeof (si));
     if (ret == -1)
         std::abort ();
-    else if (ret < sizeof (si))
+    else if (ret < static_cast<int>(sizeof (si)))
         std::abort ();
 }
 
