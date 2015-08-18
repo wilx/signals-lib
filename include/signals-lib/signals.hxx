@@ -14,6 +14,10 @@
 #define SIGNALS_LIB_HAVE_PIPE2
 #endif
 
+#if defined (__CYGWIN__)
+#include <sys/ucontext.h>
+#endif
+
 #include <signal.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -535,8 +539,9 @@ protected:
         copy_field (si.uid, psi.siginfo.si_uid);
         copy_field (si.addr, psi.siginfo.si_addr);
         copy_field (si.status, psi.siginfo.si_status);
+#if ! defined (__CYGWIN__)
         copy_field (si.band, psi.siginfo.si_band);
-
+#endif
         // De-multiplexed members of `union sigval`.
 
         copy_field (si.int_value, psi.siginfo.si_value.sival_int);
