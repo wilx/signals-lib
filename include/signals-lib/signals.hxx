@@ -28,12 +28,9 @@
 #include <vector>
 #include <atomic>
 #include <memory>
-#include <mutex>
-#include <chrono>
 #include <type_traits>
 #include <utility>
 #include <limits>
-#include <stdexcept>
 #include <system_error>
 #include <cstring>
 #include <cstdint>
